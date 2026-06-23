@@ -4,26 +4,14 @@ from qiskit_aer import AerSimulator
 
 
 def cell_inequality_comparator(qc, cell_A, cell_B, clause_qubit, ancilla_reg, k_bits):
-    """
-    Dynamically compares two k-bit variable cells.
-    Flips clause_qubit to 1 if cell_A != cell_B.
-    """
-    # 1. Bitwise XOR via CX gates across all k bits
+    """Flips clause_qubit to 1 if cell_A != cell_B."""
     for i in range(k_bits):
         qc.cx(cell_A[i], ancilla_reg[i])
         qc.cx(cell_B[i], ancilla_reg[i])
-
-    # 2. Invert bits to check for a perfect match (|11...1>)
     for i in range(k_bits):
         qc.x(ancilla_reg[i])
-
-    # Multi-controlled NOT on the ancillas flags EQUALITY
     qc.mcx(ancilla_reg[:k_bits], clause_qubit)
-
-    # Invert the clause bit so 1 means NOT EQUAL
     qc.x(clause_qubit)
-
-    # 3. Clean uncomputation pass
     for i in range(k_bits):
         qc.x(ancilla_reg[i])
     for i in reversed(range(k_bits)):
@@ -31,78 +19,58 @@ def cell_inequality_comparator(qc, cell_A, cell_B, clause_qubit, ancilla_reg, k_
         qc.cx(cell_A[i], ancilla_reg[i])
 
 
-def hint_comparator(qc, cell_var, hint_tuple, clause_qubit, k_bits):
-    """
-    Compares a k-bit variable cell against a static k-bit classical hint tuple.
-    Flips clause_qubit to 1 if they are NOT equal.
-    """
-    hint_bits = hint_tuple[:k_bits]
-
-    # Flip the variable bits where the hint expected a 0
+def hint_comparator(qc, cell_var, hint_bits, clause_qubit, k_bits):
+    """Flips clause_qubit to 1 if cell_var != hint_bits."""
     for i in range(k_bits):
-        if hint_bits[i] == 0:
+        if hint_bits[i] == 1:
             qc.x(cell_var[i])
-
-    # If the adjusted variable state matches |11...1>, they are equal
+    for i in range(k_bits):
+        qc.x(cell_var[i])
     qc.mcx(cell_var, clause_qubit)
     qc.x(clause_qubit)
-
-    # Uncompute basis modifications
     for i in reversed(range(k_bits)):
-        if hint_bits[i] == 0:
+        qc.x(cell_var[i])
+    for i in reversed(range(k_bits)):
+        if hint_bits[i] == 1:
             qc.x(cell_var[i])
 
 
-def build_generalized_sudoku_solver(puzzle_matrix, n=2):
-    """
-    Generates a pure Qiskit circuit blueprint for any n^2 x n^2 Sudoku puzzle.
-    n=2 -> 4x4 grid (2 bits per cell)
-    n=3 -> 9x9 grid (4 bits per cell)
-    """
+def enforce_valid_range(qc, cell_var, clause_qubits, k_bits, grid_size):
+    """Penalizes states outside the valid Sudoku range (1 to 9)."""
+    if grid_size == 9 and k_bits == 4:
+        qc.mcx([cell_var[0], cell_var[3]], clause_qubits[0])
+        qc.x(clause_qubits[0])
+
+        qc.mcx([cell_var[1], cell_var[3]], clause_qubits[1])
+        qc.x(clause_qubits[1])
+
+        qc.mcx([cell_var[2], cell_var[3]], clause_qubits[2])
+        qc.x(clause_qubits[2])
+
+
+def build_generalized_sudoku_solver(puzzle_matrix, n=3):
     grid_size = n ** 2
-
-    # Determine the number of qubits required to represent a single cell value
     k_bits = int(np.ceil(np.log2(grid_size)))
-
-    # Find coordinates of all empty slots (0)
     vars_positions = [(r, c) for r in range(grid_size) for c in range(grid_size) if puzzle_matrix[r][c] == 0]
     num_vars = len(vars_positions)
 
     if num_vars == 0:
         raise ValueError("No variable cells found to solve!")
 
-    # Allocate registers dynamically based on grid constraints
     var_reg = QuantumRegister(num_vars * k_bits, name='var')
     constraints = []
 
-    # Helper function to track cell logic formats
-    def get_cell_logic(r, c):
-        if puzzle_matrix[r][c] != 0:
-            val = puzzle_matrix[r][c] - 1
-            # Extract k-bit binary representation array (Low bit to High bit)
-            bit_array = [(val >> i) & 1 for i in range(k_bits)]
-            bit_array.append(True)  # True flags it as a static constant hint
-            return tuple(bit_array)
-        else:
-            idx = vars_positions.index((r, c))
-            # Slice the exact k-qubit chunk dedicated to this variable position
-            cell_qubits = [var_reg[idx * k_bits + i] for i in range(k_bits)]
-            return (cell_qubits, False)
-
-    # 1. Sweep Row and Column pairs containing at least one variable
+    # Gather standard Sudoku constraints
     for r in range(grid_size):
         for c1 in range(grid_size):
             for c2 in range(c1 + 1, grid_size):
                 if puzzle_matrix[r][c1] == 0 or puzzle_matrix[r][c2] == 0:
                     constraints.append(((r, c1), (r, c2)))
-
     for c in range(grid_size):
         for r1 in range(grid_size):
             for r2 in range(r1 + 1, grid_size):
                 if puzzle_matrix[r1][c] == 0 or puzzle_matrix[r2][c] == 0:
                     constraints.append(((r1, c), (r2, c)))
-
-    # 2. Sweep Sub-Grid Block pairs using block step intervals of size n
     for block_r in range(0, grid_size, n):
         for block_c in range(0, grid_size, n):
             block_cells = [(block_r + i, block_c + j) for i in range(n) for j in range(n)]
@@ -110,65 +78,82 @@ def build_generalized_sudoku_solver(puzzle_matrix, n=2):
                 for j in range(i + 1, grid_size):
                     p1, p2 = block_cells[i], block_cells[j]
                     if puzzle_matrix[p1[0]][p1[1]] == 0 or puzzle_matrix[p2[0]][p2[1]] == 0:
-                        pair = tuple(sorted([p1, p2]))
-                        constraints.append(pair)
+                        constraints.append(tuple(sorted([p1, p2])))
 
-    # De-duplicate the structural constraints list
     constraints = list(set(constraints))
     num_constraints = len(constraints)
 
-    # Construct the final scale-free register environment
-    clause_reg = QuantumRegister(num_constraints, name='clause')
-    xor_ancilla = QuantumRegister(k_bits, name='xor')  # Scales to track k bits
+    range_clauses_per_var = 3 if (grid_size == 9) else 0
+    total_range_clauses = num_vars * range_clauses_per_var
+
+    clause_reg = QuantumRegister(num_constraints + total_range_clauses, name='clause')
+    xor_ancilla = QuantumRegister(k_bits, name='xor')
     phase_target = QuantumRegister(1, name='phase')
     c_reg = ClassicalRegister(num_vars * k_bits, name='meas')
 
     qc = QuantumCircuit(var_reg, clause_reg, xor_ancilla, phase_target, c_reg)
 
-    # --- Initialization ---
     qc.h(var_reg)
     qc.x(phase_target)
     qc.h(phase_target)
 
-    # Calculate exact geometric Grover rotation threshold
+    def get_cell_elements(r, c):
+        """Returns (is_hint, data) where data is either a list of qubits or a bit tuple."""
+        if puzzle_matrix[r][c] != 0:
+            val = puzzle_matrix[r][c] - 1
+            bit_tuple = tuple((val >> i) & 1 for i in range(k_bits))
+            return True, bit_tuple
+        else:
+            idx = vars_positions.index((r, c))
+            cell_qubits = [var_reg[idx * k_bits + i] for i in range(k_bits)]
+            return False, cell_qubits
+
     search_space = 2 ** (num_vars * k_bits)
     iterations = int(np.floor(np.pi / 4 * np.sqrt(search_space)))
     if iterations < 1: iterations = 1
 
-    # --- Grover Iteration Loop ---
     for _ in range(iterations):
-        # A. Dynamic Forward Oracle
+        # --- Forward Oracle Pass ---
         for idx, (pos_A, pos_B) in enumerate(constraints):
-            res_A = get_cell_logic(pos_A[0], pos_A[1])
-            res_B = get_cell_logic(pos_B[0], pos_B[1])
-
-            is_hint_A, is_hint_B = res_A[-1], res_B[-1]
+            is_hint_A, data_A = get_cell_elements(pos_A[0], pos_A[1])
+            is_hint_B, data_B = get_cell_elements(pos_B[0], pos_B[1])
 
             if not is_hint_A and not is_hint_B:
-                cell_inequality_comparator(qc, res_A[0], res_B[0], clause_reg[idx], xor_ancilla, k_bits)
+                cell_inequality_comparator(qc, data_A, data_B, clause_reg[idx], xor_ancilla, k_bits)
             elif not is_hint_A and is_hint_B:
-                hint_comparator(qc, res_A[0], res_B[:-1], clause_reg[idx], k_bits)
+                hint_comparator(qc, data_A, data_B, clause_reg[idx], k_bits)
             elif is_hint_A and not is_hint_B:
-                hint_comparator(qc, res_B[0], res_A[:-1], clause_reg[idx], k_bits)
+                hint_comparator(qc, data_B, data_A, clause_reg[idx], k_bits)
 
-        # Global Conjunction State Evaluation
+        for idx in range(num_vars):
+            _, cell_qubits = get_cell_elements(vars_positions[idx][0], vars_positions[idx][1])
+            r_start = num_constraints + (idx * range_clauses_per_var)
+            enforce_valid_range(qc, cell_qubits, clause_reg[r_start: r_start + range_clauses_per_var], k_bits,
+                                grid_size)
+
+        # Global Reflection
         qc.mcx(clause_reg, phase_target)
 
-        # B. Dynamic Backward Oracle Uncomputation
-        for idx, (pos_A, pos_B) in reversed(list(enumerate(constraints))):
-            res_A = get_cell_logic(pos_A[0], pos_A[1])
-            res_B = get_cell_logic(pos_B[0], pos_B[1])
+        # --- Backward Uncomputation Pass ---
+        for idx in range(num_vars):
+            _, cell_qubits = get_cell_elements(vars_positions[idx][0], vars_positions[idx][1])
+            r_start = num_constraints + (idx * range_clauses_per_var)
+            enforce_valid_range(qc, cell_qubits, clause_reg[r_start: r_start + range_clauses_per_var], k_bits,
+                                grid_size)
 
-            is_hint_A, is_hint_B = res_A[-1], res_B[-1]
+        # FIXED: Properly unpacking pos_A and pos_B coordinates here
+        for idx, (pos_A, pos_B) in reversed(list(enumerate(constraints))):
+            is_hint_A, data_A = get_cell_elements(pos_A[0], pos_A[1])
+            is_hint_B, data_B = get_cell_elements(pos_B[0], pos_B[1])
 
             if not is_hint_A and not is_hint_B:
-                cell_inequality_comparator(qc, res_A[0], res_B[0], clause_reg[idx], xor_ancilla, k_bits)
+                cell_inequality_comparator(qc, data_A, data_B, clause_reg[idx], xor_ancilla, k_bits)
             elif not is_hint_A and is_hint_B:
-                hint_comparator(qc, res_A[0], res_B[:-1], clause_reg[idx], k_bits)
+                hint_comparator(qc, data_A, data_B, clause_reg[idx], k_bits)
             elif is_hint_A and not is_hint_B:
-                hint_comparator(qc, res_B[0], res_A[:-1], clause_reg[idx], k_bits)
+                hint_comparator(qc, data_B, data_A, clause_reg[idx], k_bits)
 
-        # C. Diffuser Phase
+        # --- Diffuser Pass ---
         qc.h(var_reg)
         qc.x(var_reg)
         qc.h(var_reg[-1])
@@ -182,48 +167,45 @@ def build_generalized_sudoku_solver(puzzle_matrix, n=2):
 
 
 if __name__ == "__main__":
-    # Define a 4x4 puzzle matrix (n=2)
-    test_4x4_puzzle = [
-        [1, 0, 4, 3],
-        [3, 4, 1, 2],  # Missing position (1,2) -> Should solve to 1
-        [4, 3, 2, 1],  # Missing position (2,1) -> Should solve to 3
-        [2, 1, 0, 4]
+    # Your exact target matrix layout from your screen capture
+    test_9x9_puzzle = [
+        [5, 3, 4, 6, 7, 8, 9, 1, 2],
+        [6, 7, 2, 1, 9, 5, 3, 4, 8],
+        [1, 9, 8, 3, 4, 2, 5, 6, 7],
+
+        [8, 5, 9, 7, 6, 1, 0, 2, 3],  # Missing position (3,6) -> Should solve to 4
+        [4, 2, 6, 8, 5, 3, 7, 9, 1],
+        [7, 1, 3, 9, 2, 4, 8, 5, 6],
+
+        [9, 6, 1, 5, 3, 7, 2, 8, 4],
+        [2, 8, 7, 4, 1, 9, 6, 3, 5],
+        [3, 4, 5, 2, 8, 6, 1, 7, 9]
     ]
 
-    # Track where the open positions are for interpretation later
-    open_slots = [(r, c) for r in range(4) for c in range(4) if test_4x4_puzzle[r][c] == 0]
+    open_slots = [(r, c) for r in range(9) for c in range(9) if test_9x9_puzzle[r][c] == 0]
     num_vars = len(open_slots)
 
-    print("Assembling generalized solver layout for a 4x4 configuration (n=2)...")
-    # Call the scale-free factory function explicitly specifying n=2
-    sudoku_circuit = build_generalized_sudoku_solver(test_4x4_puzzle, n=2)
+    print("Assembling generalized solver layout for a 9x9 configuration (n=3)...")
+    sudoku_circuit = build_generalized_sudoku_solver(test_9x9_puzzle, n=3)
 
-    print("Simulating circuit execution on AerSimulator backend...")
+    print(f"Circuit compiled successfully with {sudoku_circuit.num_qubits} qubits.")
     backend = AerSimulator()
     job = backend.run(sudoku_circuit, shots=1024)
     counts = job.result().get_counts()
 
-    # Extract the winning bitstring configuration
     winning_bitstring = max(counts, key=counts.get)
     high_score = counts[winning_bitstring]
 
     print(f"\nRaw winning bitstring from simulator: {winning_bitstring} (found {high_score}/1024 times)")
 
-    # --- SCALE-FREE LITTLE-ENDIAN INTERPRETATION ---
-    # Reverse the bitstring so character index maps cleanly to sequential var_reg allocation
     ordered_bits = winning_bitstring[::-1]
-
-    # Dynamic bit-width for n=2 is 2 bits per cell
-    k_bits = int(np.ceil(np.log2(4)))
+    k_bits = int(np.ceil(np.log2(9)))
 
     print(f"Tracked Open Slots: {open_slots}")
     print("-" * 40)
 
     for idx in range(num_vars):
-        # Slice out the exact k_bits chunk for this specific variable
         cell_bits = ordered_bits[idx * k_bits: (idx + 1) * k_bits]
-
-        # Reconstruct the value from binary bits (ordered low-to-high)
         decimal_val = 0
         for bit_position, bit_char in enumerate(cell_bits):
             decimal_val |= (int(bit_char) << bit_position)

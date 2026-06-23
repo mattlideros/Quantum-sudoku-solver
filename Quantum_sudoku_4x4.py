@@ -143,10 +143,10 @@ def build_sudoku_solver(puzzle_matrix):
 
 # --- RUN EXECUTION ---
 test_puzzle = [
-    [1, 2, 4, 0],
-    [3, 0, 1, 2],  # Missing position (1,2) -> Should solve to 1
-    [4, 3, 2, 1],  # Missing position (2,1) -> Should solve to 3
-    [2, 1, 0, 4]
+    [1, 2, 4, 0], # Missing position (0,3) -> Should solve to 3
+    [3, 0, 1, 2], # Missing position (1,1) -> Should solve to 4
+    [4, 3, 2, 1],
+    [2, 1, 3, 4]
 ]
 
 print("Assembling Sudoku Oracle and Diffuser tracks...")
