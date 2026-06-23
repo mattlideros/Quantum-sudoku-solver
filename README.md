@@ -61,7 +61,7 @@ Once every constraint pair from the list has checked its state, the overall vali
 $\begin{matrix}a\end{matrix}$
 
 ### 5. Test Cases
-Test puzzles are included. For the 4x4 puzzle, the test puzzle is given 2 unassigned cells; this program should resolve quickly when run locally. For 3 unassigned cells, the program resolved locally but had a run time of a few minutes. Similarly, for our test 9x9 grid with 1 unassigned cell, the program resolved and retruned a valid solution within a few minutes. For 4 unassigned cells my local machine did not have enough memory to run the program 
+Test puzzles are included. For the 4x4 puzzle, the test puzzle is given 2 unassigned cells; this program should resolve quickly when run locally. For 3 unassigned cells, the program resolved locally but had a run time of a few minutes. Similarly, for our test 9x9 grid with 1 unassigned cell, the program resolved and retruned a valid solution within a few minutes. For 4 unassigned cells my local machine did not have enough memory to run the program. The user is encouraged to edit the test puzzles and attempt to run the program with 1-3 missing positions for a 4x4 grid and 1 missing position for the 9x9 grid. 
 
 ```python
 test_puzzle = [
