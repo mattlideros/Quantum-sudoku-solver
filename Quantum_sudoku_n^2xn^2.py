@@ -1,4 +1,5 @@
 import numpy as np
+import itertools
 from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
 from qiskit_aer import AerSimulator
 
@@ -35,20 +36,60 @@ def hint_comparator(qc, cell_var, hint_bits, clause_qubit, k_bits):
             qc.x(cell_var[i])
 
 
-def enforce_valid_range(qc, cell_var, clause_qubits, k_bits, grid_size):
-    """Penalizes states outside the valid Sudoku range (1 to 9)."""
-    if grid_size == 9 and k_bits == 4:
-        qc.mcx([cell_var[0], cell_var[3]], clause_qubits[0])
-        qc.x(clause_qubits[0])
+def _get_invalid_implicants(grid_size, k_bits):
+    """
+    Helper to programmatically find the minimal bit patterns (implicants)
+    representing numbers out of bounds: [grid_size, 2**k_bits - 1].
+    Returns a list of dicts: {bit_index: bit_value}.
+    """
+    invalid_states = set(range(grid_size, 1 << k_bits))
+    if not invalid_states:
+        return []
 
-        qc.mcx([cell_var[1], cell_var[3]], clause_qubits[1])
-        qc.x(clause_qubits[1])
+    implicants = []
+    remaining = set(invalid_states)
 
-        qc.mcx([cell_var[2], cell_var[3]], clause_qubits[2])
-        qc.x(clause_qubits[2])
+    # Greedy sub-cube minimization from largest cubes to smallest
+    for size in range(k_bits, 0, -1):
+        for combination in itertools.combinations(range(k_bits), k_bits - size):
+            for values in itertools.product([0, 1], repeat=len(combination)):
+                cube_states = []
+                for num in range(1 << k_bits):
+                    match = True
+                    for idx, val in zip(combination, values):
+                        if ((num >> idx) & 1) != val:
+                            match = False
+                            break
+                    if match:
+                        cube_states.append(num)
+
+                if cube_states and all(s in invalid_states for s in cube_states):
+                    if any(s in remaining for s in cube_states):
+                        implicants.append({idx: val for idx, val in zip(combination, values)})
+                        remaining.difference_update(cube_states)
+    return implicants
 
 
-def build_generalized_sudoku_solver(puzzle_matrix, n=3):
+def enforce_valid_range(qc, cell_var, clause_qubits, implicants):
+    """Penalizes states outside the valid Sudoku range using calculated implicants."""
+    for idx, imp in enumerate(implicants):
+        control_qubits = []
+        for bit_idx, bit_val in imp.items():
+            # If the condition requires a 0 bit, wrap with X gates to activate MCX control
+            if bit_val == 0:
+                qc.x(cell_var[bit_idx])
+            control_qubits.append(cell_var[bit_idx])
+
+        qc.mcx(control_qubits, clause_qubits[idx])
+        qc.x(clause_qubits[idx])
+
+        # Uncompute the temporary X gates
+        for bit_idx, bit_val in imp.items():
+            if bit_val == 0:
+                qc.x(cell_var[bit_idx])
+
+
+def build_generalized_sudoku_solver(puzzle_matrix, n):
     grid_size = n ** 2
     k_bits = int(np.ceil(np.log2(grid_size)))
     vars_positions = [(r, c) for r in range(grid_size) for c in range(grid_size) if puzzle_matrix[r][c] == 0]
@@ -83,7 +124,9 @@ def build_generalized_sudoku_solver(puzzle_matrix, n=3):
     constraints = list(set(constraints))
     num_constraints = len(constraints)
 
-    range_clauses_per_var = 3 if (grid_size == 9) else 0
+    # Compute minimal implicants for out-of-bounds states dynamically based on n
+    implicants = _get_invalid_implicants(grid_size, k_bits)
+    range_clauses_per_var = len(implicants)
     total_range_clauses = num_vars * range_clauses_per_var
 
     clause_reg = QuantumRegister(num_constraints + total_range_clauses, name='clause')
@@ -125,23 +168,22 @@ def build_generalized_sudoku_solver(puzzle_matrix, n=3):
             elif is_hint_A and not is_hint_B:
                 hint_comparator(qc, data_B, data_A, clause_reg[idx], k_bits)
 
-        for idx in range(num_vars):
-            _, cell_qubits = get_cell_elements(vars_positions[idx][0], vars_positions[idx][1])
-            r_start = num_constraints + (idx * range_clauses_per_var)
-            enforce_valid_range(qc, cell_qubits, clause_reg[r_start: r_start + range_clauses_per_var], k_bits,
-                                grid_size)
+        if range_clauses_per_var > 0:
+            for idx in range(num_vars):
+                _, cell_qubits = get_cell_elements(vars_positions[idx][0], vars_positions[idx][1])
+                r_start = num_constraints + (idx * range_clauses_per_var)
+                enforce_valid_range(qc, cell_qubits, clause_reg[r_start: r_start + range_clauses_per_var], implicants)
 
         # Global Reflection
         qc.mcx(clause_reg, phase_target)
 
         # --- Backward Uncomputation Pass ---
-        for idx in range(num_vars):
-            _, cell_qubits = get_cell_elements(vars_positions[idx][0], vars_positions[idx][1])
-            r_start = num_constraints + (idx * range_clauses_per_var)
-            enforce_valid_range(qc, cell_qubits, clause_reg[r_start: r_start + range_clauses_per_var], k_bits,
-                                grid_size)
+        if range_clauses_per_var > 0:
+            for idx in range(num_vars):
+                _, cell_qubits = get_cell_elements(vars_positions[idx][0], vars_positions[idx][1])
+                r_start = num_constraints + (idx * range_clauses_per_var)
+                enforce_valid_range(qc, cell_qubits, clause_reg[r_start: r_start + range_clauses_per_var], implicants)
 
-        # FIXED: Properly unpacking pos_A and pos_B coordinates here
         for idx, (pos_A, pos_B) in reversed(list(enumerate(constraints))):
             is_hint_A, data_A = get_cell_elements(pos_A[0], pos_A[1])
             is_hint_B, data_B = get_cell_elements(pos_B[0], pos_B[1])
@@ -167,7 +209,6 @@ def build_generalized_sudoku_solver(puzzle_matrix, n=3):
 
 
 if __name__ == "__main__":
-    # Your exact target matrix layout from your screen capture
     test_9x9_puzzle = [
         [5, 3, 4, 6, 7, 8, 9, 1, 2],
         [6, 7, 2, 1, 9, 5, 3, 4, 8],
